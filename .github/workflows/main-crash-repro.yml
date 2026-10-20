@@ -86,13 +86,13 @@ jobs:
           python3 - <<'PYCODE'
           import os,base64,hashlib,subprocess
           p=base64.b64decode(os.environ['DIAG_PATCH_BASE64'])
-          assert hashlib.sha256(p).hexdigest() == 'd10b9d7a6574d500b1ed78e74aaedb462d1666f525e8c5107842f9864561f875'
+          assert hashlib.sha256(p).hexdigest() == 'e69dd131d7f9a66ae78a02d5ed154511198b0a397db070f57b13c9403f938a58'
           subprocess.run(['git','apply','-'],input=p,check=True)
           PYCODE
           trap 'git restore --worktree crates/verify/tests/crash.rs crates/enc-ffmpeg/src/base.rs crates/enc-ffmpeg/src/mux/segmented_stream.rs' EXIT
           scripts/verify/run.sh full --suites crash --no-run
           for timed in false true; do
-            for stop in 183 184 185; do
+            for stop in 184 186; do
               export CAP_DIAG_TIMED="$timed" CAP_DIAG_STOP="$stop"
               export CAP_VERIFY_REPORT_DIR="$TMPDIR/loss-diag/$timed-$stop/reports"
               export CAP_VERIFY_SCRATCH="$TMPDIR/loss-diag/$timed-$stop/scratch"
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: loss-boundary-diagnostic
+          name: loss-boundary-untraced
           path: |
             ${{ runner.temp }}/main-crash-repro/controller/loss-diag
           retention-days: 14
