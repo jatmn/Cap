@@ -1,4 +1,4 @@
-name: Unchanged main crash reproduction
+name: Studio crash oracle validation
 on:
   push:
     branches: [ci/main-crash-repro-xZXWHq6s]
@@ -6,8 +6,21 @@ permissions:
   contents: read
 jobs:
   crash:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -23,61 +36,112 @@ jobs:
           repository: CapSoftware/Cap
           ref: 57369c4310c633e383a591b807897652e873e6d5
           persist-credentials: false
-      - name: Verify unchanged main and runtime
-        shell: bash
+      - name: Apply and identify candidate
+        env:
+          PATCH_BASE64: ${{ vars.CAP_CRASH_PATCH_XZXWHQ6S }}
         run: |
-          test "$(git rev-parse HEAD)" = 57369c4310c633e383a591b807897652e873e6d5
-          test -z "$(git status --porcelain)"
-          git log -1 --format=fuller
-          sw_vers
-          uname -m
-          runtime="$RUNNER_TEMP/main-crash-repro"
-          mkdir -p "$runtime/controller" "$runtime/build"/{cargo-target,go-build,go-mod,npm,bun,pip}
-          {
-            echo "TMPDIR=$runtime/controller"
-            echo "TMP=$runtime/controller"
-            echo "TEMP=$runtime/controller"
-            echo "CARGO_TARGET_DIR=$runtime/build/cargo-target"
-            echo "GOCACHE=$runtime/build/go-build"
-            echo "GOMODCACHE=$runtime/build/go-mod"
-            echo "NPM_CONFIG_CACHE=$runtime/build/npm"
-            echo "BUN_INSTALL_CACHE_DIR=$runtime/build/bun"
-            echo "PIP_CACHE_DIR=$runtime/build/pip"
-            echo "CAP_VERIFY_REPORT_DIR=$RUNNER_TEMP/verify-report"
-            echo "CAP_VERIFY_FLAKY_FILE=$RUNNER_TEMP/verify-report/flaky.txt"
-          } >> "$GITHUB_ENV"
+          py="$(command -v python3 || command -v python)"
+          "$py" - <<'PYCODE'
+          import os,pathlib,base64,hashlib,subprocess
+          patch=base64.b64decode(os.environ['PATCH_BASE64'])
+          assert hashlib.sha256(patch).hexdigest() == 'd346e85a95c7d401e2957bd1ce3e51baf8cfe61070bcb571b453deb050be93b3'
+          subprocess.run(['git','apply','--index','-'],input=patch,check=True)
+          assert subprocess.check_output(['git','write-tree'],text=True).strip() == 'ec60ba63e72cd746f19ce462d21579cc2da6e178'
+          print('Validated candidate tree ec60ba63e72cd746f19ce462d21579cc2da6e178 on upstream57369c4')
+          runtime=pathlib.Path(os.environ['RUNNER_TEMP'])/'main-crash-repro'
+          paths={'TMPDIR':runtime/'controller','TMP':runtime/'controller','TEMP':runtime/'controller','CARGO_TARGET_DIR':runtime/'build/cargo-target','GOCACHE':runtime/'build/go-build','GOMODCACHE':runtime/'build/go-mod','NPM_CONFIG_CACHE':runtime/'build/npm','BUN_INSTALL_CACHE_DIR':runtime/'build/bun','PIP_CACHE_DIR':runtime/'build/pip','CAP_VERIFY_REPORT_DIR':runtime/'reports','CAP_VERIFY_FIXTURE_DIR':runtime/'fixtures'}
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              for key,path in paths.items():
+                  path.mkdir(parents=True,exist_ok=True)
+                  f.write(f'{key}={path.as_posix()}\n')
+          PYCODE
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/db/
+            ${{ env.CARGO_TARGET_DIR }}
+          key: crash-verify-xZXWHq6s-${{ runner.os }}-${{ github.sha }}
+          restore-keys: crash-verify-xZXWHq6s-${{ runner.os }}-
       - name: Upstream test setup
         uses: ./.github/actions/engine-verify-setup
         with:
-          target: aarch64-apple-darwin
-          tier: fast
-      - name: Make upstream FFmpeg framework available to test binaries
-        shell: bash
+          target: ${{ matrix.target }}
+          tier: full
+      - name: Runtime libraries and cache source verification
         run: |
-          framework="$GITHUB_WORKSPACE/target/Frameworks"
-          test -r "$framework/Spacedrive.framework/Libraries/libavcodec.61.19.100.dylib"
-          mkdir -p "$CARGO_TARGET_DIR/ci-verify"
-          ln -s "$framework" "$CARGO_TARGET_DIR/Frameworks"
-          ln -s "$framework" "$CARGO_TARGET_DIR/ci-verify/Frameworks"
-      - name: Build crash suite
-        shell: bash
-        run: scripts/verify/run.sh fast --suites crash --no-run
-      - name: Run both failing static-screen cases
+          py="$(command -v python3 || command -v python)"
+          "$py" scripts/verify/mtime.py apply "$CARGO_TARGET_DIR/ci-verify/verify-src-manifest.txt"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            framework="$GITHUB_WORKSPACE/target/Frameworks"
+            test -r "$framework/Spacedrive.framework/Libraries/libavcodec.61.19.100.dylib"
+            mkdir -p "$CARGO_TARGET_DIR/ci-verify"
+            ln -sfn "$framework" "$CARGO_TARGET_DIR/Frameworks"
+            ln -sfn "$framework" "$CARGO_TARGET_DIR/ci-verify/Frameworks"
+          elif [[ "$RUNNER_OS" == Windows ]]; then
+            mkdir -p "$CARGO_TARGET_DIR/ci-verify"
+            cp target/native-deps/dxc/dxcompiler.dll target/native-deps/dxc/dxil.dll "$CARGO_TARGET_DIR/ci-verify/"
+          fi
+      - name: Required formatting and crate check
+        run: |
+          cargo fmt --all --check
+          cargo check --locked --profile ci-verify -p cap-verify --tests
+      - name: Build and oracle regression tests
+        id: build
+        run: |
+          scripts/verify/run.sh full --suites crash --no-run
+          cargo test --locked --profile ci-verify -p cap-verify --test crash complete_prefix_keeps_whole_fragments_before_every_truncated_tail -- --exact
+          cargo test --locked --profile ci-verify -p cap-verify --test crash timed_fragment_span_still_rejects_a_delayed_flush -- --exact
+      - name: Full crash suite
         id: test
-        shell: bash
-        run: scripts/verify/run.sh fast --suites crash --case 'crash/recorder-kill/*/static-screen'
-      - name: Verify source remained unchanged
-        if: always()
-        shell: bash
+        run: scripts/verify/run.sh full --suites crash
+      - name: Record candidate build source
+        if: always() && steps.build.outcome != 'skipped'
         run: |
-          test "$(git rev-parse HEAD)" = 57369c4310c633e383a591b807897652e873e6d5
-          git diff --exit-code HEAD
-      - name: Upload case evidence
-        if: always() && steps.test.outcome != 'skipped'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          py="$(command -v python3 || command -v python)"
+          "$py" scripts/verify/mtime.py record "$CARGO_TARGET_DIR/ci-verify/verify-src-manifest.txt"
+      - uses: actions/cache/save@v4
+        if: always() && steps.build.outcome != 'skipped'
         with:
-          name: unchanged-main-static-screen
           path: |
-            ${{ runner.temp }}/verify-report
-            ${{ runner.temp }}/verify-report.rerun
+            ~/.cargo/registry/
+            ~/.cargo/git/db/
+            ${{ env.CARGO_TARGET_DIR }}
+          key: crash-verify-xZXWHq6s-${{ runner.os }}-${{ github.sha }}
+      - name: Negative control must reject disabled timed flushing
+        if: runner.os == 'macOS'
+        run: |
+          cp crates/verify/tests/crash.rs "$TMPDIR/crash.rs.candidate"
+          trap 'cp "$TMPDIR/crash.rs.candidate" crates/verify/tests/crash.rs' EXIT
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p=Path('crates/verify/tests/crash.rs')
+          s=p.read_text()
+          assert s.count('timed_fragments: true,') == 2
+          p.write_text(s.replace('timed_fragments: true,','timed_fragments: false,'))
+          PYCODE
+          set +e
+          CAP_VERIFY_REPORT_DIR="$TMPDIR/negative-control" scripts/verify/run.sh fast --suites crash --case 'crash/recorder-kill/inproc/static-screen'
+          result=$?
+          set -e
+          test "$result" -ne 0
+          python3 - <<'PYCODE'
+          import os,json,pathlib
+          cases=[json.loads(line) for p in (pathlib.Path(os.environ['TMPDIR'])/'negative-control').glob('*.jsonl') for line in p.read_text().splitlines()]
+          assert any(c['case']=='crash/recorder-kill/inproc/static-screen' and c['outcome']=='fail' and ('fragment-span' in c['failures'] or 'loss-time' in c['failures']) for c in cases), cases
+          print('Negative control correctly rejected missing timed flushes')
+          PYCODE
+      - name: Verify final candidate and record build source
+        if: always()
+        run: |
+          git diff --exit-code
+          test "$(git write-tree)" = ec60ba63e72cd746f19ce462d21579cc2da6e178
+          py="$(command -v python3 || command -v python)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: crash-candidate-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/main-crash-repro/reports
+            ${{ runner.temp }}/main-crash-repro/controller/negative-control
           retention-days: 14
