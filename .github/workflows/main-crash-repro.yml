@@ -78,82 +78,42 @@ jobs:
             mkdir -p "$CARGO_TARGET_DIR/ci-verify"
             cp target/native-deps/dxc/dxcompiler.dll target/native-deps/dxc/dxil.dll "$CARGO_TARGET_DIR/ci-verify/"
           fi
-      - name: Required formatting and crate check
+      - name: Trace exact crash boundaries under both configurations
+        env:
+          DIAG_PATCH_BASE64: ${{ vars.CAP_LOSS_DIAG_XZXWHQ6S }}
+          CAP_VERIFY_KEEP: "1"
         run: |
-          rustup component add rustfmt
-          cargo fmt --all --check
-          cargo check --locked --profile ci-verify -p cap-verify --tests
-      - name: Compare unchanged main for newly observed loss failures
-        run: |
-          cp crates/verify/tests/crash.rs "$TMPDIR/crash.rs.candidate"
-          cp crates/verify/expectations.toml "$TMPDIR/expectations.candidate"
-          trap 'cp "$TMPDIR/crash.rs.candidate" crates/verify/tests/crash.rs; cp "$TMPDIR/expectations.candidate" crates/verify/expectations.toml' EXIT
-          git show HEAD:crates/verify/tests/crash.rs > crates/verify/tests/crash.rs
-          git show HEAD:crates/verify/expectations.toml > crates/verify/expectations.toml
-          for case in random1 rollover+2; do
-            set +e
-            CAP_VERIFY_REPORT_DIR="$TMPDIR/baseline-loss-$case" scripts/verify/run.sh full --suites crash --case "crash/recorder-kill/inproc/$case"
-            result=$?
-            set -e
-            echo "Unchanged main $case exit: $result"
-          done
-      - name: Build and oracle regression tests
-        id: build
-        run: |
+          python3 - <<'PYCODE'
+          import os,base64,hashlib,subprocess
+          p=base64.b64decode(os.environ['DIAG_PATCH_BASE64'])
+          assert hashlib.sha256(p).hexdigest() == 'f8594288fca141bb0b5154eec21797ec2382a89763aa8af1532116a58dc034d8'
+          subprocess.run(['git','apply','-'],input=p,check=True)
+          PYCODE
+          trap 'git restore --worktree crates/verify/tests/crash.rs crates/enc-ffmpeg/src/base.rs crates/enc-ffmpeg/src/mux/segmented_stream.rs' EXIT
           scripts/verify/run.sh full --suites crash --no-run
-          cargo test --locked --profile ci-verify -p cap-verify --test crash complete_prefix_keeps_whole_fragments_before_every_truncated_tail -- --exact
-          cargo test --locked --profile ci-verify -p cap-verify --test crash timed_fragment_span_still_rejects_a_delayed_flush -- --exact
-      - name: Full crash suite
-        id: test
-        run: scripts/verify/run.sh full --suites crash
-      - name: Record candidate build source
-        if: always() && steps.build.outcome != 'skipped'
-        run: |
-          py="$(command -v python3 || command -v python)"
-          "$py" scripts/verify/mtime.py record "$CARGO_TARGET_DIR/ci-verify/verify-src-manifest.txt"
-      - uses: actions/cache/save@v4
-        if: always() && steps.build.outcome != 'skipped'
-        with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/db/
-            ${{ env.CARGO_TARGET_DIR }}
-          key: crash-verify-xZXWHq6s-${{ runner.os }}-${{ github.sha }}
-      - name: Negative control must reject disabled timed flushing
-        if: always() && runner.os == 'macOS' && steps.build.outcome == 'success'
-        run: |
-          cp crates/verify/tests/crash.rs "$TMPDIR/crash.rs.candidate"
-          trap 'cp "$TMPDIR/crash.rs.candidate" crates/verify/tests/crash.rs' EXIT
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          p=Path('crates/verify/tests/crash.rs')
-          s=p.read_text()
-          assert s.count('timed_fragments: true,') == 2
-          p.write_text(s.replace('timed_fragments: true,','timed_fragments: false,'))
-          PYCODE
-          set +e
-          CAP_VERIFY_REPORT_DIR="$TMPDIR/negative-control" scripts/verify/run.sh fast --suites crash --case 'crash/recorder-kill/inproc/static-screen'
-          result=$?
-          set -e
-          test "$result" -ne 0
-          python3 - <<'PYCODE'
-          import os,json,pathlib
-          cases=[json.loads(line) for p in (pathlib.Path(os.environ['TMPDIR'])/'negative-control').glob('*.jsonl') for line in p.read_text().splitlines()]
-          assert any(c['case']=='crash/recorder-kill/inproc/static-screen' and c['outcome']=='fail' and ('fragment-span' in c['failures'] or 'loss-time' in c['failures']) for c in cases), cases
-          print('Negative control correctly rejected missing timed flushes')
-          PYCODE
-      - name: Verify final candidate and record build source
+          for timed in false true; do
+            for stop in 183 184 185; do
+              export CAP_DIAG_TIMED="$timed" CAP_DIAG_STOP="$stop"
+              export CAP_VERIFY_REPORT_DIR="$TMPDIR/loss-diag/$timed-$stop/reports"
+              export CAP_VERIFY_SCRATCH="$TMPDIR/loss-diag/$timed-$stop/scratch"
+              mkdir -p "$CAP_VERIFY_REPORT_DIR" "$CAP_VERIFY_SCRATCH"
+              set +e
+              scripts/verify/run.sh full --suites crash --case 'crash/recorder-kill/inproc/random1' > "$TMPDIR/loss-diag/$timed-$stop/run.log" 2>&1
+              result=$?
+              set -e
+              echo "timed=$timed exact-stop=$stop exit=$result"
+              tail -12 "$TMPDIR/loss-diag/$timed-$stop/run.log"
+            done
+          done
+      - name: Verify candidate restored
         if: always()
         run: |
           git diff --exit-code
           test "$(git write-tree)" = ec60ba63e72cd746f19ce462d21579cc2da6e178
-          py="$(command -v python3 || command -v python)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: crash-candidate-${{ runner.os }}
+          name: loss-boundary-diagnostic
           path: |
-            ${{ runner.temp }}/main-crash-repro/reports
-            ${{ runner.temp }}/main-crash-repro/controller/negative-control
-            ${{ runner.temp }}/main-crash-repro/controller/baseline-loss-*
+            ${{ runner.temp }}/main-crash-repro/controller/loss-diag
           retention-days: 14
