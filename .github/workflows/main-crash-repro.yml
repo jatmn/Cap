@@ -84,6 +84,7 @@ jobs:
           fi
       - name: Required formatting and crate check
         run: |
+          rustup component add rustfmt
           cargo fmt --all --check
           cargo check --locked --profile ci-verify -p cap-verify --tests
       - name: Build and oracle regression tests
