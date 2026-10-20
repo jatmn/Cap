@@ -10,8 +10,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -83,6 +83,20 @@ jobs:
           rustup component add rustfmt
           cargo fmt --all --check
           cargo check --locked --profile ci-verify -p cap-verify --tests
+      - name: Compare unchanged main for newly observed loss failures
+        run: |
+          cp crates/verify/tests/crash.rs "$TMPDIR/crash.rs.candidate"
+          cp crates/verify/expectations.toml "$TMPDIR/expectations.candidate"
+          trap 'cp "$TMPDIR/crash.rs.candidate" crates/verify/tests/crash.rs; cp "$TMPDIR/expectations.candidate" crates/verify/expectations.toml' EXIT
+          git show HEAD:crates/verify/tests/crash.rs > crates/verify/tests/crash.rs
+          git show HEAD:crates/verify/expectations.toml > crates/verify/expectations.toml
+          for case in random1 rollover+2; do
+            set +e
+            CAP_VERIFY_REPORT_DIR="$TMPDIR/baseline-loss-$case" scripts/verify/run.sh full --suites crash --case "crash/recorder-kill/inproc/$case"
+            result=$?
+            set -e
+            echo "Unchanged main $case exit: $result"
+          done
       - name: Build and oracle regression tests
         id: build
         run: |
@@ -106,7 +120,7 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}
           key: crash-verify-xZXWHq6s-${{ runner.os }}-${{ github.sha }}
       - name: Negative control must reject disabled timed flushing
-        if: runner.os == 'macOS'
+        if: always() && runner.os == 'macOS' && steps.build.outcome == 'success'
         run: |
           cp crates/verify/tests/crash.rs "$TMPDIR/crash.rs.candidate"
           trap 'cp "$TMPDIR/crash.rs.candidate" crates/verify/tests/crash.rs' EXIT
@@ -141,4 +155,5 @@ jobs:
           path: |
             ${{ runner.temp }}/main-crash-repro/reports
             ${{ runner.temp }}/main-crash-repro/controller/negative-control
+            ${{ runner.temp }}/main-crash-repro/controller/baseline-loss-*
           retention-days: 14
