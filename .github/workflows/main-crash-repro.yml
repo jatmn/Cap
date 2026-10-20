@@ -1,0 +1,75 @@
+name: Unchanged main crash reproduction
+on:
+  push:
+    branches: [ci/main-crash-repro-xZXWHq6s]
+permissions:
+  contents: read
+jobs:
+  crash:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      CAP_VERIFY_CARGO_PROFILE: ci-verify
+      CAP_VERIFY_NEXTEST_PROFILE: ci
+      CAP_VERIFY_LOCKED: "1"
+      CAP_VERIFY_REQUIRE_SUPPORTED: "1"
+      CAP_VERIFY_HOST: github-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: CapSoftware/Cap
+          ref: 57369c4310c633e383a591b807897652e873e6d5
+          persist-credentials: false
+      - name: Verify unchanged main and runtime
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 57369c4310c633e383a591b807897652e873e6d5
+          test -z "$(git status --porcelain)"
+          git log -1 --format=fuller
+          sw_vers
+          uname -m
+          runtime="$RUNNER_TEMP/main-crash-repro"
+          mkdir -p "$runtime/controller" "$runtime/build"/{cargo-target,go-build,go-mod,npm,bun,pip}
+          {
+            echo "TMPDIR=$runtime/controller"
+            echo "TMP=$runtime/controller"
+            echo "TEMP=$runtime/controller"
+            echo "CARGO_TARGET_DIR=$runtime/build/cargo-target"
+            echo "GOCACHE=$runtime/build/go-build"
+            echo "GOMODCACHE=$runtime/build/go-mod"
+            echo "NPM_CONFIG_CACHE=$runtime/build/npm"
+            echo "BUN_INSTALL_CACHE_DIR=$runtime/build/bun"
+            echo "PIP_CACHE_DIR=$runtime/build/pip"
+            echo "CAP_VERIFY_REPORT_DIR=$RUNNER_TEMP/verify-report"
+            echo "CAP_VERIFY_FLAKY_FILE=$RUNNER_TEMP/verify-report/flaky.txt"
+          } >> "$GITHUB_ENV"
+      - name: Upstream test setup
+        uses: ./.github/actions/engine-verify-setup
+        with:
+          target: aarch64-apple-darwin
+          tier: fast
+      - name: Build crash suite
+        shell: bash
+        run: scripts/verify/run.sh fast --suites crash --no-run
+      - name: Run both failing static-screen cases
+        id: test
+        shell: bash
+        run: scripts/verify/run.sh fast --suites crash --case 'crash/recorder-kill/*/static-screen'
+      - name: Verify source remained unchanged
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 57369c4310c633e383a591b807897652e873e6d5
+          git diff --exit-code HEAD
+      - name: Upload case evidence
+        if: always() && steps.test.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unchanged-main-static-screen
+          path: |
+            ${{ runner.temp }}/verify-report
+            ${{ runner.temp }}/verify-report.rerun
+          retention-days: 14
