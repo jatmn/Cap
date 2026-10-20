@@ -51,6 +51,14 @@ jobs:
         with:
           target: aarch64-apple-darwin
           tier: fast
+      - name: Make upstream FFmpeg framework available to test binaries
+        shell: bash
+        run: |
+          framework="$GITHUB_WORKSPACE/target/Frameworks"
+          test -r "$framework/Spacedrive.framework/Libraries/libavcodec.61.19.100.dylib"
+          mkdir -p "$CARGO_TARGET_DIR/ci-verify"
+          ln -s "$framework" "$CARGO_TARGET_DIR/Frameworks"
+          ln -s "$framework" "$CARGO_TARGET_DIR/ci-verify/Frameworks"
       - name: Build crash suite
         shell: bash
         run: scripts/verify/run.sh fast --suites crash --no-run
