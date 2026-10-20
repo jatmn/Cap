@@ -86,7 +86,7 @@ jobs:
           python3 - <<'PYCODE'
           import os,base64,hashlib,subprocess
           p=base64.b64decode(os.environ['DIAG_PATCH_BASE64'])
-          assert hashlib.sha256(p).hexdigest() == 'f8594288fca141bb0b5154eec21797ec2382a89763aa8af1532116a58dc034d8'
+          assert hashlib.sha256(p).hexdigest() == 'd10b9d7a6574d500b1ed78e74aaedb462d1666f525e8c5107842f9864561f875'
           subprocess.run(['git','apply','-'],input=p,check=True)
           PYCODE
           trap 'git restore --worktree crates/verify/tests/crash.rs crates/enc-ffmpeg/src/base.rs crates/enc-ffmpeg/src/mux/segmented_stream.rs' EXIT
